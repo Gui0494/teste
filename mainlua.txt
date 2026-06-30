@@ -1,0 +1,362 @@
+--// HIT KILL PUNCH COMPLETO — VERSÃO REVISADA
+--// Coloque este Script dentro de um Tool em StarterPack
+--// Nome recomendado do Tool: HitKillPunch
+--// Uso recomendado: seu próprio jogo no Roblox Studio
+
+local Tool = script.Parent
+local Players = game:GetService("Players")
+
+-- Garante que o Tool funcione mesmo sem uma peça chamada Handle
+Tool.RequiresHandle = false
+
+local CONFIG = {
+	-- Distância máxima para o soco funcionar
+	Range = 8,
+
+	-- Tempo entre cada soco
+	Cooldown = 0.55,
+
+	-- Tempo em que o braço fica causando dano depois do clique
+	HitWindow = 0.25,
+
+	-- Se true, mata instantaneamente
+	HitKill = true,
+
+	-- Se HitKill = false, usa esse dano
+	Damage = 999999999,
+
+	-- Se quiser liberar só para você, coloque true
+	OnlyAllowedUsers = false,
+
+	-- Coloque seu UserId aqui se OnlyAllowedUsers = true
+	AllowedUsers = {
+		[123456789] = true,
+	},
+
+	-- Evita matar jogador do mesmo time
+	IgnoreSameTeam = true,
+
+	-- Se true, não mata personagem com ForceField
+	RespectForceField = true,
+
+	-- Se true, acerta só um alvo por soco
+	OneTargetPerPunch = true,
+}
+
+local lastUse = {}
+local punching = {}
+local punchToken = {}
+local connectedCharacters = {}
+
+local function getPlayerFromTool()
+	local character = Tool.Parent
+	if not character then
+		return nil
+	end
+
+	return Players:GetPlayerFromCharacter(character)
+end
+
+local function isAllowed(player)
+	if not CONFIG.OnlyAllowedUsers then
+		return true
+	end
+
+	return CONFIG.AllowedUsers[player.UserId] == true
+end
+
+local function getCharacterData(character)
+	if not character then
+		return nil
+	end
+
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	local root = character:FindFirstChild("HumanoidRootPart")
+
+	if not humanoid or not root then
+		return nil
+	end
+
+	if humanoid.Health <= 0 then
+		return nil
+	end
+
+	return humanoid, root
+end
+
+local function canPunch(player)
+	local now = os.clock()
+	local last = lastUse[player]
+
+	if last and now - last < CONFIG.Cooldown then
+		return false
+	end
+
+	lastUse[player] = now
+	return true
+end
+
+local function getArm(character, names)
+	for _, name in ipairs(names) do
+		local part = character:FindFirstChild(name)
+
+		if part and part:IsA("BasePart") then
+			return part
+		end
+	end
+
+	for _, name in ipairs(names) do
+		local part = character:WaitForChild(name, 0.15)
+
+		if part and part:IsA("BasePart") then
+			return part
+		end
+	end
+
+	return nil
+end
+
+local function getTargetFromHit(hit)
+	if not hit then
+		return nil
+	end
+
+	local targetCharacter = hit:FindFirstAncestorOfClass("Model")
+	if not targetCharacter then
+		return nil
+	end
+
+	local targetHumanoid = targetCharacter:FindFirstChildOfClass("Humanoid")
+	local targetRoot = targetCharacter:FindFirstChild("HumanoidRootPart")
+
+	if not targetHumanoid or not targetRoot then
+		return nil
+	end
+
+	if targetHumanoid.Health <= 0 then
+		return nil
+	end
+
+	return targetCharacter, targetHumanoid, targetRoot
+end
+
+local function isSameTeam(attackerPlayer, targetCharacter)
+	local targetPlayer = Players:GetPlayerFromCharacter(targetCharacter)
+
+	if not targetPlayer then
+		return false
+	end
+
+	if not attackerPlayer.Team or not targetPlayer.Team then
+		return false
+	end
+
+	return attackerPlayer.Team == targetPlayer.Team
+end
+
+local function hasForceField(character)
+	return character:FindFirstChildOfClass("ForceField") ~= nil
+end
+
+local function applyDamage(attackerPlayer, attackerCharacter, hit)
+	if not attackerPlayer then
+		return
+	end
+
+	if not attackerCharacter then
+		return
+	end
+
+	if not punching[attackerPlayer] then
+		return
+	end
+
+	local attackerHumanoid, attackerRoot = getCharacterData(attackerCharacter)
+	if not attackerHumanoid or not attackerRoot then
+		return
+	end
+
+	local targetCharacter, targetHumanoid, targetRoot = getTargetFromHit(hit)
+	if not targetCharacter or not targetHumanoid or not targetRoot then
+		return
+	end
+
+	-- Impede acertar você mesmo
+	if targetCharacter == attackerCharacter then
+		return
+	end
+
+	-- Impede acertar aliado
+	if CONFIG.IgnoreSameTeam and isSameTeam(attackerPlayer, targetCharacter) then
+		return
+	end
+
+	-- Respeita ForceField, se ligado
+	if CONFIG.RespectForceField and hasForceField(targetCharacter) then
+		return
+	end
+
+	-- Validação de distância no servidor
+	local distance = (attackerRoot.Position - targetRoot.Position).Magnitude
+	if distance > CONFIG.Range then
+		return
+	end
+
+	-- Aplica hit kill / dano alto
+	if CONFIG.HitKill then
+		targetHumanoid.Health = 0
+	else
+		targetHumanoid:TakeDamage(CONFIG.Damage)
+	end
+
+	-- Evita matar vários no mesmo soco
+	if CONFIG.OneTargetPerPunch then
+		punching[attackerPlayer] = false
+	end
+end
+
+local function connectArm(character, arm)
+	if not arm then
+		return
+	end
+
+	if not arm:IsA("BasePart") then
+		return
+	end
+
+	pcall(function()
+		arm.CanTouch = true
+	end)
+
+	local connection
+	connection = arm.Touched:Connect(function(hit)
+		local attackerPlayer = Players:GetPlayerFromCharacter(character)
+		if not attackerPlayer then
+			return
+		end
+
+		applyDamage(attackerPlayer, character, hit)
+	end)
+
+	return connection
+end
+
+local function setupCharacter(character)
+	if not character then
+		return
+	end
+
+	if connectedCharacters[character] then
+		return
+	end
+
+	connectedCharacters[character] = {
+		connections = {},
+	}
+
+	local rightArm = getArm(character, {
+		"Right Arm",
+		"RightHand",
+		"RightLowerArm",
+		"RightUpperArm",
+	})
+
+	local leftArm = getArm(character, {
+		"Left Arm",
+		"LeftHand",
+		"LeftLowerArm",
+		"LeftUpperArm",
+	})
+
+	local rightConnection = connectArm(character, rightArm)
+	local leftConnection = connectArm(character, leftArm)
+
+	if rightConnection then
+		table.insert(connectedCharacters[character].connections, rightConnection)
+	end
+
+	if leftConnection then
+		table.insert(connectedCharacters[character].connections, leftConnection)
+	end
+
+	character.Destroying:Connect(function()
+		local data = connectedCharacters[character]
+
+		if data and data.connections then
+			for _, connection in ipairs(data.connections) do
+				pcall(function()
+					connection:Disconnect()
+				end)
+			end
+		end
+
+		connectedCharacters[character] = nil
+	end)
+end
+
+Tool.Equipped:Connect(function()
+	local player = getPlayerFromTool()
+	if not player then
+		return
+	end
+
+	local character = player.Character
+	if not character then
+		return
+	end
+
+	setupCharacter(character)
+end)
+
+Tool.Activated:Connect(function()
+	local player = getPlayerFromTool()
+	if not player then
+		return
+	end
+
+	if not isAllowed(player) then
+		return
+	end
+
+	local character = player.Character
+	if not character then
+		return
+	end
+
+	local humanoid, root = getCharacterData(character)
+	if not humanoid or not root then
+		return
+	end
+
+	if not canPunch(player) then
+		return
+	end
+
+	setupCharacter(character)
+
+	punchToken[player] = (punchToken[player] or 0) + 1
+	local currentToken = punchToken[player]
+
+	punching[player] = true
+
+	task.delay(CONFIG.HitWindow, function()
+		if punchToken[player] == currentToken then
+			punching[player] = false
+		end
+	end)
+end)
+
+Tool.Unequipped:Connect(function()
+	local player = getPlayerFromTool()
+	if not player then
+		return
+	end
+
+	punching[player] = false
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+	lastUse[player] = nil
+	punching[player] = nil
+	punchToken[player] = nil
+end)
